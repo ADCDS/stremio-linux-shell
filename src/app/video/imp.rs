@@ -11,7 +11,7 @@ use libmpv2::{
     mpv_end_file_reason,
     render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType},
 };
-use std::{cell::RefCell, env, os::raw::c_void, sync::OnceLock};
+use std::{cell::RefCell, env, os::raw::c_void, sync::OnceLock, time::Duration};
 use tracing::error;
 
 fn get_proc_address(_context: &GLContext, name: &str) -> *mut c_void {
@@ -53,13 +53,22 @@ impl Default for Video {
 }
 
 impl Video {
-    fn on_event<T: Fn(Event)>(&self, callback: T) {
-        if let Some(result) = self.mpv.borrow_mut().wait_event(0.0) {
+    fn drain_events<T: Fn(Event)>(&self, callback: T) {
+        // Do not let a burst of libmpv events monopolize GTK's main loop.
+        const MAX_EVENTS_PER_TICK: usize = 32;
+
+        for _ in 0..MAX_EVENTS_PER_TICK {
+            // libmpv owns the event value, so keep its borrow alive through dispatch.
+            let mut mpv = self.mpv.borrow_mut();
+            let Some(result) = mpv.wait_event(0.0) else {
+                break;
+            };
+
             match result {
                 Ok(event) => callback(event),
                 Err(e) => error!("Failed to wait for event: {e}"),
             }
-        };
+        }
     }
 
     pub fn send_command(&self, name: &str, args: &[&str]) {
@@ -107,45 +116,50 @@ impl ObjectImpl for Video {
     fn constructed(&self) {
         self.parent_constructed();
 
-        glib::idle_add_local(clone!(
-            #[weak(rename_to = video)]
-            self,
-            #[weak(rename_to = object)]
-            self.obj(),
-            #[upgrade_or]
-            ControlFlow::Break,
-            move || {
-                video.on_event(|event| match event {
-                    Event::PropertyChange { name, change, .. } => {
-                        let value = match change {
-                            PropertyData::Str(v) => Some(v.to_variant()),
-                            PropertyData::Flag(v) => Some(v.to_variant()),
-                            PropertyData::Double(v) => Some(v.to_variant()),
-                            _ => None,
-                        };
+        // wait_event(0.0) is non-blocking. Running it from an idle source spins
+        // continuously when libmpv has no events and starves normal GTK work.
+        glib::timeout_add_local(
+            Duration::from_millis(10),
+            clone!(
+                #[weak(rename_to = video)]
+                self,
+                #[weak(rename_to = object)]
+                self.obj(),
+                #[upgrade_or]
+                ControlFlow::Break,
+                move || {
+                    video.drain_events(|event| match event {
+                        Event::PropertyChange { name, change, .. } => {
+                            let value = match change {
+                                PropertyData::Str(v) => Some(v.to_variant()),
+                                PropertyData::Flag(v) => Some(v.to_variant()),
+                                PropertyData::Double(v) => Some(v.to_variant()),
+                                _ => None,
+                            };
 
-                        if let Some(value) = value {
-                            object.emit_by_name::<()>("property-changed", &[&name, &value]);
+                            if let Some(value) = value {
+                                object.emit_by_name::<()>("property-changed", &[&name, &value]);
+                            }
                         }
-                    }
-                    Event::EndFile(reason) => {
-                        let reason = match reason {
-                            mpv_end_file_reason::Eof => "eof".to_string(),
-                            mpv_end_file_reason::Stop => "stop".to_string(),
-                            mpv_end_file_reason::Redirect => "redirect".to_string(),
-                            mpv_end_file_reason::Error => "error".to_string(),
-                            mpv_end_file_reason::Quit => "quit".to_string(),
-                            _ => "other".to_string(),
-                        };
+                        Event::EndFile(reason) => {
+                            let reason = match reason {
+                                mpv_end_file_reason::Eof => "eof".to_string(),
+                                mpv_end_file_reason::Stop => "stop".to_string(),
+                                mpv_end_file_reason::Redirect => "redirect".to_string(),
+                                mpv_end_file_reason::Error => "error".to_string(),
+                                mpv_end_file_reason::Quit => "quit".to_string(),
+                                _ => "other".to_string(),
+                            };
 
-                        object.emit_by_name::<()>("playback-ended", &[&reason]);
-                    }
-                    _ => {}
-                });
+                            object.emit_by_name::<()>("playback-ended", &[&reason]);
+                        }
+                        _ => {}
+                    });
 
-                ControlFlow::Continue
-            }
-        ));
+                    ControlFlow::Continue
+                }
+            ),
+        );
     }
 }
 
@@ -186,19 +200,29 @@ impl WidgetImpl for Video {
 
             let (sender, receiver) = flume::unbounded::<()>();
 
-            glib::idle_add_local(clone!(
-                #[weak]
-                object,
-                #[upgrade_or]
-                ControlFlow::Break,
-                move || {
-                    if let Ok(()) = receiver.try_recv() {
-                        object.queue_render();
-                    }
+            // Coalesce libmpv render notifications without busy-polling the GTK loop.
+            glib::timeout_add_local(
+                Duration::from_millis(16),
+                clone!(
+                    #[weak]
+                    object,
+                    #[upgrade_or]
+                    ControlFlow::Break,
+                    move || {
+                        // Bound queue draining so an overactive render callback cannot
+                        // monopolize the main loop while it is producing new notifications.
+                        const MAX_RENDER_NOTIFICATIONS_PER_TICK: usize = 32;
+                        let needs_render = (0..MAX_RENDER_NOTIFICATIONS_PER_TICK)
+                            .any(|_| receiver.try_recv().is_ok());
 
-                    ControlFlow::Continue
-                }
-            ));
+                        if needs_render {
+                            object.queue_render();
+                        }
+
+                        ControlFlow::Continue
+                    }
+                ),
+            );
 
             render_context.set_update_callback(move || {
                 sender.send(()).ok();

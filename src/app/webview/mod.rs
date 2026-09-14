@@ -19,6 +19,10 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
+fn post_message_script(serialized_message: &str) -> String {
+    format!("(() => {{ __postMessage({serialized_message}); return true; }})()")
+}
+
 impl Default for WebView {
     fn default() -> Self {
         glib::Object::builder()
@@ -72,7 +76,10 @@ impl WebView {
 
         let serialized_message =
             serde_json::to_string(&message).expect("Failed to serialize as JSON string");
-        let script = format!("__postMessage({serialized_message})");
+        // WebKitGTK rejects JavaScript evaluations whose final value is `undefined`.
+        // __postMessage deliberately returns nothing, so explicitly return a supported
+        // primitive after delivering the IPC message.
+        let script = post_message_script(&serialized_message);
 
         widget
             .webview
@@ -160,5 +167,18 @@ impl WebView {
 
             None
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::post_message_script;
+
+    #[test]
+    fn post_message_script_returns_a_supported_value() {
+        assert_eq!(
+            post_message_script("\"event\""),
+            "(() => { __postMessage(\"event\"); return true; })()"
+        );
     }
 }
