@@ -21,6 +21,10 @@ impl Default for Video {
         glib::Object::builder()
             .property("hexpand", true)
             .property("vexpand", true)
+            // Redrawing the GLArea for WebKit overlay damage can feed stale
+            // intermediate textures back into the scene on NVIDIA. Keep the
+            // last video texture and redraw only on libmpv update callbacks.
+            .property("auto-render", false)
             .build()
     }
 }

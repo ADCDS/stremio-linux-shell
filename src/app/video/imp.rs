@@ -212,8 +212,13 @@ impl WidgetImpl for Video {
                         // Bound queue draining so an overactive render callback cannot
                         // monopolize the main loop while it is producing new notifications.
                         const MAX_RENDER_NOTIFICATIONS_PER_TICK: usize = 32;
-                        let needs_render = (0..MAX_RENDER_NOTIFICATIONS_PER_TICK)
-                            .any(|_| receiver.try_recv().is_ok());
+                        let mut needs_render = false;
+                        for _ in 0..MAX_RENDER_NOTIFICATIONS_PER_TICK {
+                            if receiver.try_recv().is_err() {
+                                break;
+                            }
+                            needs_render = true;
+                        }
 
                         if needs_render {
                             object.queue_render();
