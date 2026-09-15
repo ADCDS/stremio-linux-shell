@@ -5,7 +5,8 @@ use gtk::{
     glib::{self, clone},
     prelude::*,
 };
-use webkit::{WebView as WebKitWebView, prelude::*};
+use tracing::error;
+use webkit::{WebProcessTerminationReason, WebView as WebKitWebView, prelude::*};
 
 #[derive(Default)]
 pub struct WebView {
@@ -52,6 +53,21 @@ impl ObjectImpl for WebView {
             }
         ));
         self.webview.add_controller(gesture);
+
+        // A crashed WebKit content process otherwise leaves the native shell alive
+        // with a permanently frozen surface. Reloading starts a fresh content process
+        // while preserving the WebView's user-content manager and IPC preload script.
+        self.webview
+            .connect_web_process_terminated(|webview, reason| {
+                error!("WebKit content process terminated: {reason:?}");
+                if matches!(
+                    reason,
+                    WebProcessTerminationReason::Crashed
+                        | WebProcessTerminationReason::ExceededMemoryLimit
+                ) {
+                    webview.reload();
+                }
+            });
 
         object.append(&self.webview);
     }

@@ -39,6 +39,8 @@
         "--env=LC_NUMERIC=C",
         "--env=SERVER_PATH=/app/libexec/stremio/server.js",
         "--env=ANV_DEBUG=video-decode,video-encode",
+        "--env=WEBKIT_DISABLE_COMPOSITING_MODE=1",
+        "--env=WEBKIT_DISABLE_DMABUF_RENDERER=1",
         "--env=LD_LIBRARY_PATH=/app/lib:/app/lib64",
         "--env=RUST_LOG=debug"
     ],
